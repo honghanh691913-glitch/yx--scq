@@ -33,6 +33,88 @@ let SUBUpdateTime = 6;
 let total = 24;
 let timestamp = 4102329600000;
 const regex = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[.*\]):?(\d+)?#?(.*)?$/;
+
+// ===== IPv4 / IPv6 双栈地址处理 =====
+// URI 中 IPv6 必须写成 [IPv6]:port；IPv4 / 域名保持原样。
+// 内部统一使用“不带 []”的 IPv6，只有在拼接 URI / host:port 时再加 []。
+function 去除IPv6方括号(address) {
+	if (address === null || address === undefined) return '';
+	const value = String(address).trim();
+	if (value.startsWith('[') && value.endsWith(']')) {
+		return value.slice(1, -1);
+	}
+	return value;
+}
+
+function 是IPv6地址(address) {
+	const value = 去除IPv6方括号(address);
+	return value.includes(':');
+}
+
+function URI地址格式(address) {
+	const value = 去除IPv6方括号(address);
+	return 是IPv6地址(value) ? `[${value}]` : value;
+}
+
+function 地址端口格式(address, port, remark = '') {
+	const value = URI地址格式(address);
+	const portPart = port !== null && port !== undefined && String(port) !== '' ? `:${port}` : '';
+	const remarkPart = remark ? `#${remark}` : '';
+	return `${value}${portPart}${remarkPart}`;
+}
+
+// 解析以下常见格式：
+// 1. 1.2.3.4:443#备注
+// 2. domain.com:443#备注
+// 3. [2606:4700::1]:443#备注
+// 4. 裸 IPv6（无端口） -> 使用 defaultPort
+//
+// 对“裸 IPv6:端口”不做猜测，因为 IPv6 最后一段本身也可能是纯数字。
+// 需要指定 IPv6 端口时，请使用标准格式 [IPv6]:port。
+function 解析地址条目(input, defaultPort) {
+	let value = String(input || '').trim();
+	let remark = '';
+
+	const hashIndex = value.indexOf('#');
+	if (hashIndex >= 0) {
+		remark = value.slice(hashIndex + 1);
+		value = value.slice(0, hashIndex);
+	}
+
+	let address = value;
+	let port = String(defaultPort ?? '');
+
+	if (value.startsWith('[')) {
+		const end = value.indexOf(']');
+		if (end > 0) {
+			address = value.slice(1, end);
+			const rest = value.slice(end + 1);
+			if (/^:\d+$/.test(rest)) {
+				port = rest.slice(1);
+			}
+		}
+	} else {
+		const colonCount = (value.match(/:/g) || []).length;
+
+		// IPv4 / 域名:端口
+		if (colonCount === 1) {
+			const lastColon = value.lastIndexOf(':');
+			const maybePort = value.slice(lastColon + 1);
+			if (/^\d+$/.test(maybePort)) {
+				address = value.slice(0, lastColon);
+				port = maybePort;
+			}
+		}
+		// colonCount > 1 视为裸 IPv6，不从最后一段猜端口
+	}
+
+	address = 去除IPv6方括号(address);
+	return {
+		address,
+		port,
+		addressid: remark || address
+	};
+}
 let fakeUserID;
 let fakeHostName;
 let httpsPorts = ["2053", "2083", "2087", "2096", "8443"];
@@ -91,8 +173,8 @@ async function 整理优选列表(api) {
 					for (let i = 1; i < lines.length; i++) {
 						const columns = lines[i].split(',')[0];
 						if (columns) {
-							newapi += `${columns}:${测速端口}${节点备注 ? `#${节点备注}` : ''}\n`;
-							if (api[index].includes('proxyip=true')) proxyIPPool.push(`${columns}:${测速端口}`);
+							newapi += `${地址端口格式(columns, 测速端口, 节点备注)}\n`;
+							if (api[index].includes('proxyip=true')) proxyIPPool.push(地址端口格式(columns, 测速端口));
 						}
 					}
 				} else {
@@ -101,15 +183,18 @@ async function 整理优选列表(api) {
 						// 如果URL带有'proxyip=true'，则将内容添加到proxyIPPool
 						proxyIPPool = proxyIPPool.concat((await 整理(content)).map(item => {
 							const baseItem = item.split('#')[0] || item;
-							if (baseItem.includes(':')) {
-								const port = baseItem.split(':')[1];
-								if (!httpsPorts.includes(port)) {
-									return baseItem;
-								}
-							} else {
-								return `${baseItem}:443`;
-							}
-							return null; // 不符合条件时返回 null
+							const parsedProxy = 解析地址条目(baseItem, '443');
+							const normalizedProxy = 地址端口格式(parsedProxy.address, parsedProxy.port || '443');
+
+							// 保留原逻辑：显式 HTTPS 端口不进入 proxyIPPool；
+							// 无端口地址按 443 处理。IPv6 不再使用 split(':')。
+							const explicitPort = baseItem.startsWith('[')
+								? /^\[[^\]]+\]:\d+$/.test(baseItem)
+								: (baseItem.match(/:/g) || []).length === 1 && /:\d+$/.test(baseItem);
+
+							if (!explicitPort) return normalizedProxy;
+							if (!httpsPorts.includes(String(parsedProxy.port))) return normalizedProxy;
+							return null;
 						}).filter(Boolean)); // 过滤掉 null 值
 					}
 					// 将内容添加到newapi中
@@ -183,13 +268,13 @@ async function 整理测速结果(tls) {
 					const ipAddress = row[0];
 					const port = row[1];
 					const dataCenter = row[tlsIndex + remarkIndex];
-					const formattedAddress = `${ipAddress}:${port}#${dataCenter}`;
+					const formattedAddress = 地址端口格式(ipAddress, port, dataCenter);
 
 					// 处理代理IP池
 					if (csvUrl.includes('proxyip=true') &&
 						row[tlsIndex].toUpperCase() === 'TRUE' &&
 						!httpsPorts.includes(port)) {
-						proxyIPPool.push(`${ipAddress}:${port}`);
+						proxyIPPool.push(地址端口格式(ipAddress, port));
 					}
 
 					return formattedAddress;
@@ -1205,46 +1290,10 @@ export default {
 				const uniqueAddressesnotls = Array.from(new Set(addressesnotls.concat(newAddressesnotlsapi, newAddressesnotlscsv).filter(item => item && item.trim())));
 
 				notlsresponseBody = uniqueAddressesnotls.map(address => {
-					let port = "-1";
-					let addressid = address;
-
-					const match = addressid.match(regex);
-					if (!match) {
-						if (address.includes(':') && address.includes('#')) {
-							const parts = address.split(':');
-							address = parts[0];
-							const subParts = parts[1].split('#');
-							port = subParts[0];
-							addressid = subParts[1];
-						} else if (address.includes(':')) {
-							const parts = address.split(':');
-							address = parts[0];
-							port = parts[1];
-						} else if (address.includes('#')) {
-							const parts = address.split('#');
-							address = parts[0];
-							addressid = parts[1];
-						}
-
-						if (addressid.includes(':')) {
-							addressid = addressid.split(':')[0];
-						}
-					} else {
-						address = match[1];
-						port = match[2] || port;
-						addressid = match[3] || address;
-					}
-
-					const httpPorts = ["8080", "8880", "2052", "2082", "2086", "2095"];
-					if (!isValidIPv4(address) && port == "-1") {
-						for (let httpPort of httpPorts) {
-							if (address.includes(httpPort)) {
-								port = httpPort;
-								break;
-							}
-						}
-					}
-					if (port == "-1") port = "80";
+					const parsedAddress = 解析地址条目(address, "80");
+					address = parsedAddress.address;
+					let port = parsedAddress.port || "80";
+					let addressid = parsedAddress.addressid;
 					//console.log(address, port, addressid);
 
 					if (隧道版本作者.trim() === atob('Y21saXU=') && 获取代理IP.trim() === 'true') {
@@ -1283,7 +1332,7 @@ export default {
 						const vmessLink = `vmess://${utf8ToBase64(`{"v":"2","ps":"${addressid + EndPS}","add":"${address}","port":"${port}","id":"${uuid}","aid":"${额外ID}","scy":"${加密方式}","net":"ws","type":"${type}","host":"${host}","path":"${path}","tls":"","sni":"","alpn":"${encodeURIComponent(alpn)}","fp":""}`)}`;
 						return vmessLink;
 					} else {
-						const 为烈士Link = `${atob(atob('ZG14bGMzTTZMeTg9')) + uuid}@${address}:${port}?security=&type=${type}&host=${host}&path=${encodeURIComponent(path)}&encryption=none#${encodeURIComponent(addressid + EndPS)}`;
+						const 为烈士Link = `${atob(atob('ZG14bGMzTTZMeTg9')) + uuid}@${URI地址格式(address)}:${port}?security=&type=${type}&host=${host}&path=${encodeURIComponent(path)}&encryption=none#${encodeURIComponent(addressid + EndPS)}`;
 						return 为烈士Link;
 					}
 
@@ -1291,45 +1340,10 @@ export default {
 			}
 
 			const responseBody = uniqueAddresses.map(address => {
-				let port = "-1";
-				let addressid = address;
-
-				const match = addressid.match(regex);
-				if (!match) {
-					if (address.includes(':') && address.includes('#')) {
-						const parts = address.split(':');
-						address = parts[0];
-						const subParts = parts[1].split('#');
-						port = subParts[0];
-						addressid = subParts[1];
-					} else if (address.includes(':')) {
-						const parts = address.split(':');
-						address = parts[0];
-						port = parts[1];
-					} else if (address.includes('#')) {
-						const parts = address.split('#');
-						address = parts[0];
-						addressid = parts[1];
-					}
-
-					if (addressid.includes(':')) {
-						addressid = addressid.split(':')[0];
-					}
-				} else {
-					address = match[1];
-					port = match[2] || port;
-					addressid = match[3] || address;
-				}
-
-				if (!isValidIPv4(address) && port == "-1") {
-					for (let httpsPort of httpsPorts) {
-						if (address.includes(httpsPort)) {
-							port = httpsPort;
-							break;
-						}
-					}
-				}
-				if (port == "-1") port = "443";
+				const parsedAddress = 解析地址条目(address, "443");
+				address = parsedAddress.address;
+				let port = parsedAddress.port || "443";
+				let addressid = parsedAddress.addressid;
 
 				//console.log(address, port, addressid);
 
@@ -1354,7 +1368,7 @@ export default {
 							}
 						}
 
-						const matchingProxyIP = proxyIPPool.find(proxyIP => proxyIP.includes(address));
+						const matchingProxyIP = proxyIPPool.find(proxyIP => 解析地址条目(proxyIP, '').address === 去除IPv6方括号(address));
 						if (matchingProxyIP) {
 							path = atob('L3Byb3h5aXA9') + matchingProxyIP;
 						} else if (foundProxyIP) {
@@ -1382,10 +1396,10 @@ export default {
 					const vmessLink = `vmess://${utf8ToBase64(`{"v":"2","ps":"${addressid + 节点备注}","add":"${address}","port":"${port}","id":"${uuid}","aid":"${额外ID}","scy":"${加密方式}","net":"ws","type":"${type}","host":"${伪装域名}","path":"${最终路径}","tls":"tls","sni":"${sni}","alpn":"${encodeURIComponent(alpn)}","fp":"","allowInsecure":"${scv == 'true' ? '1' : '0'}","fragment":"1,40-60,30-50,tlshello"}`)}`;
 					return vmessLink;
 				} else if (协议类型 == atob('VHJvamFu')) {
-					const 特洛伊Link = `${atob(atob('ZEhKdmFtRnVPaTh2')) + uuid}@${address}:${port}?security=tls&sni=${sni}&alpn=${encodeURIComponent(alpn)}&fp=random&type=${type}&host=${伪装域名}&path=${encodeURIComponent(最终路径) + (scv == 'true' ? '&allowInsecure=1' : '')}&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}#${encodeURIComponent(addressid + 节点备注)}`;
+					const 特洛伊Link = `${atob(atob('ZEhKdmFtRnVPaTh2')) + uuid}@${URI地址格式(address)}:${port}?security=tls&sni=${sni}&alpn=${encodeURIComponent(alpn)}&fp=random&type=${type}&host=${伪装域名}&path=${encodeURIComponent(最终路径) + (scv == 'true' ? '&allowInsecure=1' : '')}&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}#${encodeURIComponent(addressid + 节点备注)}`;
 					return 特洛伊Link;
 				} else {
-					const 为烈士Link = `${atob(atob('ZG14bGMzTTZMeTg9')) + uuid}@${address}:${port}?security=tls&sni=${sni}&alpn=${encodeURIComponent(alpn)}&fp=random&type=${type}&host=${伪装域名}&path=${encodeURIComponent(最终路径) + xhttp + (scv == 'true' ? '&allowInsecure=1' : '')}&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}&encryption=none#${encodeURIComponent(addressid + 节点备注)}`;
+					const 为烈士Link = `${atob(atob('ZG14bGMzTTZMeTg9')) + uuid}@${URI地址格式(address)}:${port}?security=tls&sni=${sni}&alpn=${encodeURIComponent(alpn)}&fp=random&type=${type}&host=${伪装域名}&path=${encodeURIComponent(最终路径) + xhttp + (scv == 'true' ? '&allowInsecure=1' : '')}&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}&encryption=none#${encodeURIComponent(addressid + 节点备注)}`;
 					return 为烈士Link;
 				}
 
