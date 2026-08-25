@@ -58,6 +58,85 @@ function 格式化IP端口(ip, port = '443') {
 	return `${ip}:${port}`;
 }
 
+// 外部 subconverter 可能识别 VLESS/XHTTP，却会丢弃 URI 中的 ech 参数。
+// 在最终 Clash YAML 返回给客户端之前，根据原始 ech 参数补回 Mihomo 字段。
+function 注入ClashECH配置(yaml, rawEch) {
+	if (!yaml || !rawEch) return yaml;
+
+	const echValue = String(rawEch).trim().replace(/ /g, '+');
+	if (!echValue) return yaml;
+
+	let queryServerName = '';
+	let dnsServer = 'https://dns.alidns.com/dns-query';
+	let staticConfig = '';
+	const dnsSeparator = echValue.search(/\+https?:\/\//i);
+
+	if (dnsSeparator > 0) {
+		queryServerName = echValue.slice(0, dnsSeparator).trim();
+		dnsServer = echValue.slice(dnsSeparator + 1).trim() || dnsServer;
+	} else if (/^(?:\*\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}$/i.test(echValue)) {
+		queryServerName = echValue;
+	} else if (!/^https?:\/\//i.test(echValue) && echValue !== 'true') {
+		staticConfig = echValue;
+	}
+
+	const echFields = ['enable: true'];
+	if (queryServerName) {
+		echFields.push(`query-server-name: ${JSON.stringify(queryServerName)}`);
+	} else if (staticConfig) {
+		echFields.push(`config: ${JSON.stringify(staticConfig)}`);
+	}
+	const echOpts = `ech-opts: {${echFields.join(', ')}}`;
+
+	let matchedVlessCount = 0;
+	const lines = yaml.split('\n').map(line => {
+		if (!/^\s*-\s*\{/.test(line) || !/(?:^|[,{]\s*)type:\s*vless(?:\s*[,}])/.test(line)) {
+			return line;
+		}
+
+		matchedVlessCount += 1;
+		if (/\bech-opts\s*:/.test(line)) return line;
+
+		const closingBrace = line.lastIndexOf('}');
+		if (closingBrace === -1) return line;
+		return `${line.slice(0, closingBrace)}, ${echOpts}${line.slice(closingBrace)}`;
+	});
+
+	if (matchedVlessCount === 0) return yaml;
+	let result = lines.join('\n');
+
+	// query-server-name 需要能够查询 HTTPS/SVCB 记录；保留模板已有 DNS，仅补缺失策略。
+	if (queryServerName && !result.includes(`${JSON.stringify(queryServerName)}:`)) {
+		const policyEntry = `    ${JSON.stringify(queryServerName)}: ${dnsServer}`;
+		if (/^dns:\s*$/m.test(result)) {
+			if (/^\s{2}nameserver-policy:\s*$/m.test(result)) {
+				result = result.replace(
+					/^(\s{2}nameserver-policy:\s*)$/m,
+					`$1\n${policyEntry}`
+				);
+			} else {
+				result = result.replace(/^dns:\s*$/m, `dns:\n  nameserver-policy:\n${policyEntry}`);
+			}
+		} else if (!/^dns\s*:/m.test(result)) {
+			const dnsBlock = [
+				'dns:',
+				'  enable: true',
+				'  default-nameserver:',
+				'    - 223.5.5.5',
+				'    - 1.1.1.1',
+				'  nameserver:',
+				`    - ${dnsServer}`,
+				'  nameserver-policy:',
+				policyEntry,
+				''
+			].join('\n');
+			result = dnsBlock + result;
+		}
+	}
+
+	return result;
+}
+
 function 解析优选地址项(原始项) {
 	let raw = String(原始项 || '').trim();
 	let addressid = '';
@@ -1028,8 +1107,9 @@ export default {
 		// 请求级参数必须放在 fetch 内，避免 Cloudflare Worker 复用 isolate 时串到下一个请求。
 		let alpn = env.ALPN || '';
 		let xhttp = '';
-		let ech = env.ECH
-			? `&ech=${encodeURIComponent(String(env.ECH).trim().replace(/ /g, '+'))}`
+		let echValue = env.ECH ? String(env.ECH).trim().replace(/ /g, '+') : '';
+		let ech = echValue
+			? `&ech=${encodeURIComponent(echValue)}`
 			: '';
 		let UD = Math.floor(((timestamp - Date.now()) / timestamp * 99 * 1099511627776) / 2);
 		if (env.UA) MamaJustKilledAMan = MamaJustKilledAMan.concat(await 整理(env.UA));
@@ -1148,7 +1228,7 @@ export default {
 			// URLSearchParams 会把未编码的“+”解析为空格；恢复后再编码，完整保留 ECH 参数。
 			const echParam = url.searchParams.get('ech');
 			if (echParam && echParam.trim()) {
-				const echValue = echParam.trim().replace(/ /g, '+');
+				echValue = echParam.trim().replace(/ /g, '+');
 				ech = `&ech=${encodeURIComponent(echValue)}`;
 			}
 			alpn = url.searchParams.get('alpn') || (xhttp ? "h3%2Ch2" : alpn);
@@ -1501,6 +1581,13 @@ export default {
 				subConverterContent = surge(subConverterContent, host, path);
 			}
 			subConverterContent = revertFakeInfo(subConverterContent, uuid, host);
+			const isClashOutput = userAgent.includes('clash')
+				|| userAgent.includes('meta')
+				|| userAgent.includes('mihomo')
+				|| (format === 'clash' && !isSubConverterRequest);
+			if (isClashOutput && echValue) {
+				subConverterContent = 注入ClashECH配置(subConverterContent, echValue);
+			}
 			if (!userAgent.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(FileName)}`;
 			return new Response(subConverterContent, { headers: responseHeaders });
 		} catch (error) {
