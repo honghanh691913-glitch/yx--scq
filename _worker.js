@@ -41,10 +41,11 @@ let 更新时间 = 3;
 let MamaJustKilledAMan = ['telegram', 'twitter', 'miaoko'];
 let proxyIPPool = [];
 let socks5Data;
+let alpn = '';
 let 网络备案 = `<a href='https://t.me/CMLiussss'>萌ICP备-20240707号</a>`;//写你自己的维护者广告
 let 额外ID = '0';
 let 加密方式 = 'auto';
-let 网站图标, 网站头像, 网站背景 = '';
+let 网站图标, 网站头像, 网站背景, xhttp = '';
 
 // ===== 双端口订阅模式辅助函数 =====
 // 统一443：所有TLS优选节点强制使用443。
@@ -56,86 +57,6 @@ function 格式化IP端口(ip, port = '443') {
 	if (ip.startsWith('[') && ip.endsWith(']')) return `${ip}:${port}`;
 	if (ip.includes(':')) return `[${ip}]:${port}`;
 	return `${ip}:${port}`;
-}
-
-// 外部 subconverter 可能识别 VLESS/XHTTP，却会丢弃 URI 中的 ech 参数。
-// 在最终 Clash YAML 返回给客户端之前，根据原始 ech 参数补回 Mihomo 字段。
-function 注入ClashECH配置(yaml, rawEch, transportType = '', forceEch = false) {
-	if (!yaml || !rawEch) return yaml;
-	if (String(transportType).toLowerCase() !== 'xhttp' && !forceEch) return yaml;
-
-	const echValue = String(rawEch).trim().replace(/ /g, '+');
-	if (!echValue) return yaml;
-
-	let queryServerName = '';
-	let dnsServer = 'https://dns.alidns.com/dns-query';
-	let staticConfig = '';
-	const dnsSeparator = echValue.search(/\+https?:\/\//i);
-
-	if (dnsSeparator > 0) {
-		queryServerName = echValue.slice(0, dnsSeparator).trim();
-		dnsServer = echValue.slice(dnsSeparator + 1).trim() || dnsServer;
-	} else if (/^(?:\*\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}$/i.test(echValue)) {
-		queryServerName = echValue;
-	} else if (!/^https?:\/\//i.test(echValue) && echValue !== 'true') {
-		staticConfig = echValue;
-	}
-
-	const echFields = ['enable: true'];
-	if (queryServerName) {
-		echFields.push(`query-server-name: ${JSON.stringify(queryServerName)}`);
-	} else if (staticConfig) {
-		echFields.push(`config: ${JSON.stringify(staticConfig)}`);
-	}
-	const echOpts = `ech-opts: {${echFields.join(', ')}}`;
-
-	let matchedVlessCount = 0;
-	const lines = yaml.split('\n').map(line => {
-		if (!/^\s*-\s*\{/.test(line) || !/(?:^|[,{]\s*)type:\s*vless(?:\s*[,}])/.test(line)) {
-			return line;
-		}
-
-		matchedVlessCount += 1;
-		if (/\bech-opts\s*:/.test(line)) return line;
-
-		const closingBrace = line.lastIndexOf('}');
-		if (closingBrace === -1) return line;
-		return `${line.slice(0, closingBrace)}, ${echOpts}${line.slice(closingBrace)}`;
-	});
-
-	if (matchedVlessCount === 0) return yaml;
-	let result = lines.join('\n');
-
-	// query-server-name 需要能够查询 HTTPS/SVCB 记录；保留模板已有 DNS，仅补缺失策略。
-	if (queryServerName && !result.includes(`${JSON.stringify(queryServerName)}:`)) {
-		const policyEntry = `    ${JSON.stringify(queryServerName)}: ${dnsServer}`;
-		if (/^dns:\s*$/m.test(result)) {
-			if (/^\s{2}nameserver-policy:\s*$/m.test(result)) {
-				result = result.replace(
-					/^(\s{2}nameserver-policy:\s*)$/m,
-					`$1\n${policyEntry}`
-				);
-			} else {
-				result = result.replace(/^dns:\s*$/m, `dns:\n  nameserver-policy:\n${policyEntry}`);
-			}
-		} else if (!/^dns\s*:/m.test(result)) {
-			const dnsBlock = [
-				'dns:',
-				'  enable: true',
-				'  default-nameserver:',
-				'    - 223.5.5.5',
-				'    - 1.1.1.1',
-				'  nameserver:',
-				`    - ${dnsServer}`,
-				'  nameserver-policy:',
-				policyEntry,
-				''
-			].join('\n');
-			result = dnsBlock + result;
-		}
-	}
-
-	return result;
 }
 
 function 解析优选地址项(原始项) {
@@ -1105,13 +1026,7 @@ export default {
 		let sni = "";
 		let type = "ws";
 		let scv = env.SCV || 'false';
-		// 请求级参数必须放在 fetch 内，避免 Cloudflare Worker 复用 isolate 时串到下一个请求。
-		let alpn = env.ALPN || '';
-		let xhttp = '';
-		let echValue = env.ECH ? String(env.ECH).trim().replace(/ /g, '+') : '';
-		let ech = echValue
-			? `&ech=${encodeURIComponent(echValue)}`
-			: '';
+		alpn = env.ALPN || alpn;
 		let UD = Math.floor(((timestamp - Date.now()) / timestamp * 99 * 1099511627776) / 2);
 		if (env.UA) MamaJustKilledAMan = MamaJustKilledAMan.concat(await 整理(env.UA));
 
@@ -1226,12 +1141,6 @@ export default {
 			const mode = url.searchParams.get('mode') || null;
 			const extra = url.searchParams.get('extra') || null;
 			xhttp = (mode ? `&mode=${mode}` : "") + (extra ? `&extra=${encodeURIComponent(extra)}` : "");
-			// URLSearchParams 会把未编码的“+”解析为空格；恢复后再编码，完整保留 ECH 参数。
-			const echParam = url.searchParams.get('ech');
-			if (echParam && echParam.trim()) {
-				echValue = echParam.trim().replace(/ /g, '+');
-				ech = `&ech=${encodeURIComponent(echValue)}`;
-			}
 			alpn = url.searchParams.get('alpn') || (xhttp ? "h3%2Ch2" : alpn);
 			隧道版本作者 = url.searchParams.get(atob('ZWRnZXR1bm5lbA==')) || url.searchParams.get(atob('ZXBlaXVz')) || 隧道版本作者;
 			获取代理IP = url.searchParams.get('proxyip') || 'false';
@@ -1514,7 +1423,7 @@ export default {
 					const 特洛伊Link = `${atob(atob('ZEhKdmFtRnVPaTh2')) + uuid}@${address}:${port}?security=tls&sni=${sni}&alpn=${encodeURIComponent(alpn)}&fp=random&type=${type}&host=${伪装域名}&path=${encodeURIComponent(最终路径) + (scv == 'true' ? '&allowInsecure=1' : '')}&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}#${encodeURIComponent(addressid + 节点备注)}`;
 					return 特洛伊Link;
 				} else {
-					const 为烈士Link = `${atob(atob('ZG14bGMzTTZMeTg9')) + uuid}@${address}:${port}?security=tls&sni=${sni}&alpn=${encodeURIComponent(alpn)}&fp=random&type=${type}&host=${伪装域名}&path=${encodeURIComponent(最终路径) + xhttp + (scv == 'true' ? '&allowInsecure=1' : '')}${ech}&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}&encryption=none#${encodeURIComponent(addressid + 节点备注)}`;
+					const 为烈士Link = `${atob(atob('ZG14bGMzTTZMeTg9')) + uuid}@${address}:${port}?security=tls&sni=${sni}&alpn=${encodeURIComponent(alpn)}&fp=random&type=${type}&host=${伪装域名}&path=${encodeURIComponent(最终路径) + xhttp + (scv == 'true' ? '&allowInsecure=1' : '')}&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}&encryption=none#${encodeURIComponent(addressid + 节点备注)}`;
 					return 为烈士Link;
 				}
 
@@ -1582,20 +1491,6 @@ export default {
 				subConverterContent = surge(subConverterContent, host, path);
 			}
 			subConverterContent = revertFakeInfo(subConverterContent, uuid, host);
-			const isClashOutput = userAgent.includes('clash')
-				|| userAgent.includes('meta')
-				|| userAgent.includes('mihomo')
-				|| (format === 'clash' && !isSubConverterRequest);
-			const forceEch = url.searchParams.get('forceech') === '1'
-				|| String(env.FORCE_ECH || '').toLowerCase() === 'true';
-			if (isClashOutput && echValue) {
-				subConverterContent = 注入ClashECH配置(
-					subConverterContent,
-					echValue,
-					type,
-					forceEch
-				);
-			}
 			if (!userAgent.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(FileName)}`;
 			return new Response(subConverterContent, { headers: responseHeaders });
 		} catch (error) {
@@ -1606,3 +1501,4 @@ export default {
 		}
 	}
 };
+
