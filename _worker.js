@@ -41,11 +41,10 @@ let 更新时间 = 3;
 let MamaJustKilledAMan = ['telegram', 'twitter', 'miaoko'];
 let proxyIPPool = [];
 let socks5Data;
-let alpn = '';
 let 网络备案 = `<a href='https://t.me/CMLiussss'>萌ICP备-20240707号</a>`;//写你自己的维护者广告
 let 额外ID = '0';
 let 加密方式 = 'auto';
-let 网站图标, 网站头像, 网站背景, xhttp = '';
+let 网站图标, 网站头像, 网站背景 = '';
 
 // ===== 双端口订阅模式辅助函数 =====
 // 统一443：所有TLS优选节点强制使用443。
@@ -1026,7 +1025,12 @@ export default {
 		let sni = "";
 		let type = "ws";
 		let scv = env.SCV || 'false';
-		alpn = env.ALPN || alpn;
+		// 请求级参数必须放在 fetch 内，避免 Cloudflare Worker 复用 isolate 时串到下一个请求。
+		let alpn = env.ALPN || '';
+		let xhttp = '';
+		let ech = env.ECH
+			? `&ech=${encodeURIComponent(String(env.ECH).trim().replace(/ /g, '+'))}`
+			: '';
 		let UD = Math.floor(((timestamp - Date.now()) / timestamp * 99 * 1099511627776) / 2);
 		if (env.UA) MamaJustKilledAMan = MamaJustKilledAMan.concat(await 整理(env.UA));
 
@@ -1141,6 +1145,12 @@ export default {
 			const mode = url.searchParams.get('mode') || null;
 			const extra = url.searchParams.get('extra') || null;
 			xhttp = (mode ? `&mode=${mode}` : "") + (extra ? `&extra=${encodeURIComponent(extra)}` : "");
+			// URLSearchParams 会把未编码的“+”解析为空格；恢复后再编码，完整保留 ECH 参数。
+			const echParam = url.searchParams.get('ech');
+			if (echParam && echParam.trim()) {
+				const echValue = echParam.trim().replace(/ /g, '+');
+				ech = `&ech=${encodeURIComponent(echValue)}`;
+			}
 			alpn = url.searchParams.get('alpn') || (xhttp ? "h3%2Ch2" : alpn);
 			隧道版本作者 = url.searchParams.get(atob('ZWRnZXR1bm5lbA==')) || url.searchParams.get(atob('ZXBlaXVz')) || 隧道版本作者;
 			获取代理IP = url.searchParams.get('proxyip') || 'false';
@@ -1423,7 +1433,7 @@ export default {
 					const 特洛伊Link = `${atob(atob('ZEhKdmFtRnVPaTh2')) + uuid}@${address}:${port}?security=tls&sni=${sni}&alpn=${encodeURIComponent(alpn)}&fp=random&type=${type}&host=${伪装域名}&path=${encodeURIComponent(最终路径) + (scv == 'true' ? '&allowInsecure=1' : '')}&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}#${encodeURIComponent(addressid + 节点备注)}`;
 					return 特洛伊Link;
 				} else {
-					const 为烈士Link = `${atob(atob('ZG14bGMzTTZMeTg9')) + uuid}@${address}:${port}?security=tls&sni=${sni}&alpn=${encodeURIComponent(alpn)}&fp=random&type=${type}&host=${伪装域名}&path=${encodeURIComponent(最终路径) + xhttp + (scv == 'true' ? '&allowInsecure=1' : '')}&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}&encryption=none#${encodeURIComponent(addressid + 节点备注)}`;
+					const 为烈士Link = `${atob(atob('ZG14bGMzTTZMeTg9')) + uuid}@${address}:${port}?security=tls&sni=${sni}&alpn=${encodeURIComponent(alpn)}&fp=random&type=${type}&host=${伪装域名}&path=${encodeURIComponent(最终路径) + xhttp + (scv == 'true' ? '&allowInsecure=1' : '')}${ech}&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}&encryption=none#${encodeURIComponent(addressid + 节点备注)}`;
 					return 为烈士Link;
 				}
 
