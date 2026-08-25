@@ -60,8 +60,9 @@ function 格式化IP端口(ip, port = '443') {
 
 // 外部 subconverter 可能识别 VLESS/XHTTP，却会丢弃 URI 中的 ech 参数。
 // 在最终 Clash YAML 返回给客户端之前，根据原始 ech 参数补回 Mihomo 字段。
-function 注入ClashECH配置(yaml, rawEch) {
+function 注入ClashECH配置(yaml, rawEch, transportType = '', forceEch = false) {
 	if (!yaml || !rawEch) return yaml;
+	if (String(transportType).toLowerCase() !== 'xhttp' && !forceEch) return yaml;
 
 	const echValue = String(rawEch).trim().replace(/ /g, '+');
 	if (!echValue) return yaml;
@@ -1585,8 +1586,15 @@ export default {
 				|| userAgent.includes('meta')
 				|| userAgent.includes('mihomo')
 				|| (format === 'clash' && !isSubConverterRequest);
+			const forceEch = url.searchParams.get('forceech') === '1'
+				|| String(env.FORCE_ECH || '').toLowerCase() === 'true';
 			if (isClashOutput && echValue) {
-				subConverterContent = 注入ClashECH配置(subConverterContent, echValue);
+				subConverterContent = 注入ClashECH配置(
+					subConverterContent,
+					echValue,
+					type,
+					forceEch
+				);
 			}
 			if (!userAgent.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(FileName)}`;
 			return new Response(subConverterContent, { headers: responseHeaders });
